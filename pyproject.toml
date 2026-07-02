@@ -19,6 +19,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "httpx2>=2.5.0",
     "pytest>=8.4",
     "pytest-asyncio>=1.4",
     "ruff>=0.12",
@@ -59,6 +60,10 @@ select = [
     "T20",   # flake8-print
     "UP",    # pyupgrade
     "W",     # pycodestyle warnings
+]
+
+ignore = [
+    "D107", # __init__ args are documented in the class docstring (Google style)
 ]
 
 [tool.ruff.lint.pydocstyle]
