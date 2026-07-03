@@ -49,6 +49,22 @@ class PaymentNotFoundError(Exception):
         super().__init__(f"payment {payment_id} not found")
 
 
+def parse_attempt(headers: dict[str, Any]) -> int:
+    """Return the current attempt number, tolerating missing or corrupt headers.
+
+    A malformed ``x-attempt`` value (possible after manual re-publishing from
+    the management UI) must not crash the handler before its error handling
+    even starts: the ladder restarts from zero instead, which is bounded by
+    ``max_retries`` and therefore safe.
+    """
+    raw = headers.get(ATTEMPT_HEADER, 0)
+    try:
+        return max(0, int(raw))
+    except TypeError, ValueError:
+        logger.warning("attempt_header_corrupt", value=repr(raw))
+        return 0
+
+
 class PaymentProcessor:
     """Orchestrates processing of one payment event with retry/DLQ routing."""
 
@@ -74,7 +90,7 @@ class PaymentProcessor:
         the failure routing itself fails; the work queue then dead-letters
         the rejected message to the DLQ, so it is never lost.
         """
-        attempt = int(headers.get(ATTEMPT_HEADER, 0))
+        attempt = parse_attempt(headers)
         log = logger.bind(payment_id=str(event.payment_id), attempt=attempt)
         try:
             await self._process_once(event, log)
