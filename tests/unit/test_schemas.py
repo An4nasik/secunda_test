@@ -55,3 +55,44 @@ def test_metadata_and_description_are_optional():
     request = PaymentCreateRequest.model_validate(body)
     assert request.metadata is None
     assert request.description is None
+
+
+# --- corner cases -----------------------------------------------------------
+
+
+def test_amount_boundaries_are_inclusive():
+    minimum = PaymentCreateRequest.model_validate(make_body(amount="0.01"))
+    assert minimum.amount == Decimal("0.01")
+    maximum = PaymentCreateRequest.model_validate(make_body(amount="9999999999.99"))
+    assert maximum.amount == Decimal("9999999999.99")
+
+
+def test_amount_as_json_number_is_accepted():
+    request = PaymentCreateRequest.model_validate(make_body(amount=100.5))
+    assert request.amount == Decimal("100.5")
+
+
+def test_currency_is_case_sensitive():
+    with pytest.raises(ValidationError):
+        PaymentCreateRequest.model_validate(make_body(currency="rub"))
+
+
+def test_description_length_boundary():
+    ok = PaymentCreateRequest.model_validate(make_body(description="я" * 1024))
+    assert len(ok.description) == 1024
+    with pytest.raises(ValidationError):
+        PaymentCreateRequest.model_validate(make_body(description="я" * 1025))
+
+
+@pytest.mark.parametrize("bad_metadata", [[1, 2], "text", 42, True])
+def test_metadata_must_be_an_object(bad_metadata):
+    with pytest.raises(ValidationError):
+        PaymentCreateRequest.model_validate(make_body(metadata=bad_metadata))
+
+
+def test_unicode_survives_validation():
+    request = PaymentCreateRequest.model_validate(
+        make_body(description="Заказ №42 🚀", metadata={"комментарий": "спасибо"})
+    )
+    assert request.description == "Заказ №42 🚀"
+    assert request.metadata == {"комментарий": "спасибо"}

@@ -5,10 +5,11 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import httpx
+import pytest
 
 from app.broker import DLX_EXCHANGE, RETRY_EXCHANGE
 from app.config import Settings
-from app.consumer.handler import ATTEMPT_HEADER, PaymentProcessor
+from app.consumer.handler import ATTEMPT_HEADER, PaymentProcessor, parse_attempt
 from app.models import Currency, Payment, PaymentStatus
 from app.schemas import PaymentCreatedEvent
 
@@ -78,13 +79,15 @@ def make_event(payment: Payment | None = None) -> PaymentCreatedEvent:
     return PaymentCreatedEvent(payment_id=payment_id, occurred_at=datetime.now(UTC))
 
 
-def make_processor(session_factory, broker, http_handler=None, gateway=None) -> PaymentProcessor:
+def make_processor(
+    session_factory, broker, http_handler=None, gateway=None, settings=None
+) -> PaymentProcessor:
     transport = httpx.MockTransport(http_handler or (lambda request: httpx.Response(200)))
     return PaymentProcessor(
         session_factory=session_factory,
         broker=broker,
         http_client=httpx.AsyncClient(transport=transport),
-        settings=make_settings(),
+        settings=settings or make_settings(),
         gateway=gateway,
     )
 
@@ -207,3 +210,66 @@ async def test_missing_payment_is_retried_not_dropped():
     _, kwargs = broker.published[0]
     assert kwargs["exchange"] is RETRY_EXCHANGE
     assert kwargs["headers"][ATTEMPT_HEADER] == 1
+
+
+# --- corner cases -----------------------------------------------------------
+
+
+async def test_gateway_crash_is_a_processing_error_not_a_decline():
+    payment = make_payment()
+    session = FakeSession(payment)
+    broker = RecordingBroker()
+
+    async def gateway():
+        raise RuntimeError("gateway emulator blew up")
+
+    processor = make_processor(lambda: session, broker, gateway=gateway)
+    await processor.process(make_event(payment), headers={})
+
+    assert payment.status is PaymentStatus.PENDING, "a crash must not fabricate an outcome"
+    assert session.commits == 0
+    _, kwargs = broker.published[0]
+    assert kwargs["exchange"] is RETRY_EXCHANGE
+    assert kwargs["routing_key"] == "payments.new.retry.1"
+
+
+@pytest.mark.parametrize("corrupt", ["garbage", None, [1], {"n": 1}])
+async def test_corrupt_attempt_header_restarts_the_ladder(corrupt):
+    broker = RecordingBroker()
+    processor = make_processor(ExplodingSessionFactory(), broker)
+
+    await processor.process(make_event(), headers={ATTEMPT_HEADER: corrupt})
+
+    _, kwargs = broker.published[0]
+    assert kwargs["exchange"] is RETRY_EXCHANGE, "corrupt header must not skip retries"
+    assert kwargs["headers"][ATTEMPT_HEADER] == 1
+
+
+async def test_negative_attempt_header_is_clamped_to_zero():
+    assert parse_attempt({ATTEMPT_HEADER: -5}) == 0
+    assert parse_attempt({ATTEMPT_HEADER: "2"}) == 2
+    assert parse_attempt({}) == 0
+
+
+async def test_attempt_far_beyond_max_goes_to_dlq_not_a_ghost_queue():
+    broker = RecordingBroker()
+    processor = make_processor(ExplodingSessionFactory(), broker)
+
+    await processor.process(make_event(), headers={ATTEMPT_HEADER: 99})
+
+    _, kwargs = broker.published[0]
+    assert kwargs["exchange"] is DLX_EXCHANGE
+    assert kwargs["routing_key"] == "payments.new.dlq"
+
+
+async def test_zero_max_retries_dead_letters_on_first_failure():
+    broker = RecordingBroker()
+    processor = make_processor(
+        ExplodingSessionFactory(), broker, settings=make_settings(max_retries=0)
+    )
+
+    await processor.process(make_event(), headers={})
+
+    _, kwargs = broker.published[0]
+    assert kwargs["exchange"] is DLX_EXCHANGE
+    assert kwargs["routing_key"] == "payments.new.dlq"

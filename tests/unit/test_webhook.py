@@ -54,3 +54,23 @@ async def test_transport_error_is_a_delivery_error():
     async with make_client(handler) as client:
         with pytest.raises(WebhookDeliveryError):
             await send_webhook(client, "https://client.example.com/hook", PAYLOAD)
+
+
+async def test_timeout_is_a_delivery_error():
+    def handler(request):
+        raise httpx.ReadTimeout("endpoint accepted the connection but never answered")
+
+    async with make_client(handler) as client:
+        with pytest.raises(WebhookDeliveryError):
+            await send_webhook(client, "https://client.example.com/hook", PAYLOAD)
+
+
+async def test_redirect_is_not_followed_and_not_a_delivery():
+    # A 3xx answer means nobody actually consumed the notification: following
+    # redirects would silently deliver payment data to an unexpected host.
+    def handler(request):
+        return httpx.Response(302, headers={"Location": "https://elsewhere.example/hook"})
+
+    async with make_client(handler) as client:
+        with pytest.raises(WebhookDeliveryError):
+            await send_webhook(client, "https://client.example.com/hook", PAYLOAD)
