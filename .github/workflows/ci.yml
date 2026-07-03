@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  lint-and-unit:
+    name: Lint & unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Unit tests
+        run: uv run pytest
+
+  e2e:
+    name: E2E (docker compose)
+    runs-on: ubuntu-latest
+    needs: lint-and-unit
+    env:
+      # В CI шлюзу незачем "думать" 2-5 секунд
+      GATEWAY_DELAY_MIN_SECONDS: "0.2"
+      GATEWAY_DELAY_MAX_SECONDS: "0.5"
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Start environment
+        run: docker compose up -d --build
+
+      - name: Wait for the API
+        run: timeout 120 bash -c 'until curl -sf http://localhost:8000/healthz; do sleep 2; done'
+
+      - name: E2E tests
+        run: uv run pytest -m e2e
+
+      - name: Dump service logs
+        if: failure()
+        run: docker compose logs
+
+      - name: Teardown
+        if: always()
+        run: docker compose down -v
