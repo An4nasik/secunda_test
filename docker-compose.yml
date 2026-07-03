@@ -1,0 +1,107 @@
+name: payment-service
+
+x-app-environment: &app-environment
+  DATABASE_URL: postgresql+asyncpg://payments:payments@postgres:5432/payments
+  RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+  API_KEY: ${API_KEY:-dev-secret-key}
+  GATEWAY_DELAY_MIN_SECONDS: ${GATEWAY_DELAY_MIN_SECONDS:-2.0}
+  GATEWAY_DELAY_MAX_SECONDS: ${GATEWAY_DELAY_MAX_SECONDS:-5.0}
+  GATEWAY_SUCCESS_RATE: ${GATEWAY_SUCCESS_RATE:-0.9}
+  MAX_RETRIES: ${MAX_RETRIES:-3}
+  RETRY_BASE_DELAY_SECONDS: ${RETRY_BASE_DELAY_SECONDS:-2.0}
+  WEBHOOK_TIMEOUT_SECONDS: ${WEBHOOK_TIMEOUT_SECONDS:-10.0}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  LOG_JSON: ${LOG_JSON:-true}
+
+# Единственная точка сборки образа — сервис migrations (он стартует первым);
+# остальные сервисы переиспользуют собранный образ (pull_policy: never
+# запрещает docker тянуть его из registry).
+x-app-service: &app-service
+  image: payment-service:local
+  pull_policy: never
+  environment: *app-environment
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: payments
+      POSTGRES_PASSWORD: payments
+      POSTGRES_DB: payments
+    ports:
+      - "5432:5432"
+    volumes:
+      # PostgreSQL 18+: единый маунт каталога /var/lib/postgresql (данные
+      # лежат в подкаталоге по мажорной версии — упрощает будущий pg_upgrade)
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U payments -d payments"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 12
+
+  migrations:
+    <<: *app-service
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *app-service
+    command: ["python", "-m", "app.api"]
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrations:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  consumer:
+    <<: *app-service
+    command: ["python", "-m", "app.consumer"]
+    depends_on:
+      migrations:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+
+  outbox-relay:
+    <<: *app-service
+    command: ["python", "-m", "app.outbox"]
+    depends_on:
+      migrations:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
