@@ -1,0 +1,1 @@
+"""Payment processing consumer service."""

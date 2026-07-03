@@ -17,7 +17,17 @@ PAYMENTS_EXCHANGE = RabbitExchange("payments", type=ExchangeType.DIRECT, durable
 RETRY_EXCHANGE = RabbitExchange("payments.retry", type=ExchangeType.DIRECT, durable=True)
 DLX_EXCHANGE = RabbitExchange("payments.dlx", type=ExchangeType.DIRECT, durable=True)
 
-payments_new_queue = RabbitQueue(PAYMENTS_NEW_ROUTING_KEY, durable=True)
+# The work queue dead-letters rejected messages straight to the DLQ: even if
+# the consumer fails to route a failure explicitly (e.g. the broker publish
+# inside the error path itself fails), the message is preserved, never lost.
+payments_new_queue = RabbitQueue(
+    PAYMENTS_NEW_ROUTING_KEY,
+    durable=True,
+    arguments={
+        "x-dead-letter-exchange": DLX_EXCHANGE.name,
+        "x-dead-letter-routing-key": DLQ_ROUTING_KEY,
+    },
+)
 dlq_queue = RabbitQueue(DLQ_ROUTING_KEY, durable=True)
 
 
