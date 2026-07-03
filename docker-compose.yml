@@ -20,6 +20,9 @@ x-app-service: &app-service
   image: payment-service:local
   pull_policy: never
   environment: *app-environment
+  # host.docker.internal и на Linux тоже (для вебхуков на хост-машину в e2e)
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
 
 services:
   postgres:

@@ -73,7 +73,8 @@ convention = "google"
 known-first-party = ["app"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "D", "ANN", "PLR2004"]
+# ASYNC109/110: e2e-тесты опрашивают внешние системы циклами со sleep — это норма
+"tests/**" = ["S101", "S104", "D", "ANN", "PLR2004", "ASYNC109", "ASYNC110"]
 "migrations/**" = ["D"]
 
 [tool.pytest.ini_options]
