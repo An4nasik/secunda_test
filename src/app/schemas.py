@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Annotated, Any
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, HttpUrl
+from pydantic.networks import UrlConstraints
 
 from app.models import Currency, PaymentStatus
 
@@ -15,6 +16,11 @@ Amount = Annotated[
     Decimal,
     Field(gt=0, max_digits=12, decimal_places=2, examples=["100.50"]),
 ]
+
+# Pydantic alone allows URLs up to 2083 characters while the database column
+# is ``String(2048)``: without this cap a 2049+ character URL would pass
+# validation and blow up on INSERT with a 500 instead of a clean 422.
+WebhookUrl = Annotated[HttpUrl, UrlConstraints(max_length=2048)]
 
 
 class PaymentCreateRequest(BaseModel):
@@ -26,7 +32,7 @@ class PaymentCreateRequest(BaseModel):
     currency: Currency
     description: str | None = Field(default=None, max_length=1024)
     metadata: dict[str, Any] | None = None
-    webhook_url: HttpUrl
+    webhook_url: WebhookUrl
 
 
 class PaymentAcceptedResponse(BaseModel):
