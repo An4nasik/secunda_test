@@ -96,3 +96,28 @@ def test_unicode_survives_validation():
     )
     assert request.description == "Заказ №42 🚀"
     assert request.metadata == {"комментарий": "спасибо"}
+
+
+@pytest.mark.parametrize("special", ["NaN", "sNaN", "Infinity", "-Infinity"])
+def test_non_finite_amounts_are_rejected(special):
+    # Decimal("NaN") is a perfectly valid Decimal — but not a payment amount.
+    with pytest.raises(ValidationError):
+        PaymentCreateRequest.model_validate(make_body(amount=special))
+
+
+def test_scientific_notation_is_a_valid_decimal():
+    # "1E+2" passes digit/scale checks and equals 100; PostgreSQL NUMERIC
+    # normalizes the representation on insert.
+    request = PaymentCreateRequest.model_validate(make_body(amount="1E+2"))
+    assert request.amount == Decimal("100")
+
+
+def test_webhook_url_longer_than_db_column_is_rejected():
+    # Pydantic's own URL cap is 2083, the DB column is String(2048): anything
+    # in between must fail validation with 422, not blow up on INSERT.
+    boundary = "https://client.example.com/" + "a" * (2048 - len("https://client.example.com/"))
+    ok = PaymentCreateRequest.model_validate(make_body(webhook_url=boundary))
+    assert len(str(ok.webhook_url)) == 2048
+
+    with pytest.raises(ValidationError):
+        PaymentCreateRequest.model_validate(make_body(webhook_url=boundary + "a"))
