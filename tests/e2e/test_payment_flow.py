@@ -107,6 +107,50 @@ async def test_idempotent_replay_and_conflict(api, webhook_catcher):
     assert missing_key.status_code == 422
 
 
+async def test_poisoned_message_goes_to_dlq_and_consumer_survives(api, webhook_catcher):
+    # A message that cannot even be parsed into PaymentCreatedEvent must not
+    # kill or wedge the consumer: the work queue's DLX routes the reject
+    # straight to the DLQ, and the next valid payment is processed as usual.
+    catcher, webhook_url = webhook_catcher
+
+    connection = await aio_pika.connect_robust(RABBITMQ_URL)
+    async with connection:
+        channel = await connection.channel()
+        dlq = await channel.get_queue(DLQ_NAME)
+        await dlq.purge()
+
+        exchange = await channel.get_exchange("payments")
+        poison = b'{"this": "is not a payment event"}'
+        await exchange.publish(
+            aio_pika.Message(poison, content_type="application/json"),
+            routing_key="payments.new",
+        )
+
+        deadline = time.monotonic() + 30
+        dead_letter = None
+        while time.monotonic() < deadline:
+            message = await dlq.get(fail=False, no_ack=True)
+            if message is not None:
+                dead_letter = message
+                break
+            await asyncio.sleep(0.5)
+
+        assert dead_letter is not None, "poisoned message never reached the DLQ"
+        assert dead_letter.body == poison
+        death = (dead_letter.headers or {}).get("x-death")
+        assert death and death[0]["queue"] == "payments.new"
+
+    # The consumer is still alive: a real payment sails through end to end.
+    created = await api.post(
+        "/api/v1/payments",
+        json=make_body(webhook_url),
+        headers={"Idempotency-Key": f"e2e-poison-{uuid.uuid4()}"},
+    )
+    assert created.status_code == 202
+    payload = await catcher.next_payload()
+    assert payload["payment_id"] == created.json()["payment_id"]
+
+
 async def test_undeliverable_webhook_ends_in_dlq(api):
     # Port 9 (discard) on the host gateway: connection is always refused,
     # so every webhook attempt fails and the event must reach the DLQ
